@@ -47,6 +47,7 @@ function Get-Layout($cfg) {
         Current  = Join-Path $root 'current'
         Shared   = Join-Path $root 'shared'
         Deploy   = Join-Path $root 'deploy'
+        Incoming = Join-Path $root 'incoming'
         History  = Join-Path $root 'deploy\history.jsonl'
         Token    = Join-Path $root 'deploy\token.dat'
         Pool     = if ($cfg.AppPool) { $cfg.AppPool } else { $cfg.SiteName }
@@ -60,6 +61,20 @@ function Get-AppEnvironment($cfg, $layout) {
         foreach ($p in $cfg.Environment.PSObject.Properties) { $vars[$p.Name] = ([string]$p.Value).Replace('{shared}', $layout.Shared) }
     }
     return $vars
+}
+
+# Khóa so sánh phiên bản yyyy.M.d[.n]: theo SỐ (2026.11.20 mới hơn 2026.11.6 – so chuỗi thì ngược lại)
+function ConvertTo-VersionKey([string]$text) {
+    $v = $null
+    if ([version]::TryParse($text, [ref]$v)) { return $v }
+    return [version]'0.0'
+}
+
+# Các bản trong releases\ (bỏ thư mục tạm .*), mới nhất trước
+function Get-Releases($layout) {
+    @(Get-ChildItem $layout.Releases -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notlike '.*' -and (Test-Path (Join-Path $_.FullName 'app')) } |
+        Sort-Object { ConvertTo-VersionKey $_.Name } -Descending | ForEach-Object Name)
 }
 
 # ------------------------------------------------------------------ khe "current" (junction)

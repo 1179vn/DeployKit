@@ -52,6 +52,12 @@ Check 'khe tạm (.chua-co-ban) → không có phiên bản' {
     Equal '' (Get-CurrentVersionFromJunction $layout)
 }
 
+Write-Host 'Thứ tự phiên bản (theo số, không theo chuỗi)'
+Check '2026.11.20 mới hơn 2026.11.6; .HHmm cùng ngày' {
+    foreach ($v in '2026.11.7', '2026.11.6.1530', '2026.11.6.930') { New-Item -ItemType Directory -Force -Path (Join-Path $layout.Releases "$v\app") | Out-Null }
+    Equal '2026.11.20 2026.11.7 2026.11.6.1530 2026.11.6.930 2026.11.06' ((Get-Releases $layout) -join ' ')
+}
+
 Write-Host 'Biến môi trường, token'
 Check '{shared} → <Root>\shared' {
     $vars = Get-AppEnvironment $cfg $layout
@@ -70,7 +76,11 @@ if ($Repo) {
     Write-Host "Đóng gói thật: $Repo"
     $out = Join-Path $env:TEMP ('deploykit-pkg-' + [guid]::NewGuid().ToString('N'))
     $appCfg = Get-Content (Join-Path $Repo 'deploy\deploy.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-    Check 'package.ps1 -Local' { & (Join-Path $kit 'tools\package.ps1') -Repo $Repo -Version '2099.1.1' -OutDir $out -Local | Out-Host }
+    Check 'package.ps1 (gói máy dev)' { & (Join-Path $kit 'tools\package.ps1') -Repo $Repo -Version '2099.1.1' -OutDir $out -Local -AllowDirty | Out-Host }
+    Check 'file .sha256 đi kèm gói khớp' {
+        Equal (Get-FileHash (Join-Path $out "$($appCfg.Name)-2099.1.1.zip") -Algorithm SHA256).Hash.ToLowerInvariant() `
+            ((Get-Content (Join-Path $out "$($appCfg.Name)-2099.1.1.zip.sha256")) -split '\s+')[0]
+    }
     $zip = Join-Path $out "$($appCfg.Name)-2099.1.1.zip"
     Check 'SHA256SUMS khớp' {
         $line = Get-Content (Join-Path $out 'SHA256SUMS')

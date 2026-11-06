@@ -1,13 +1,17 @@
-﻿# DeployKit – đóng gói bản phát hành (dùng chung cho CI và máy dev; Windows PowerShell 5.1+ / pwsh).
-#   CI (workflow release.yml) và máy dev (dự phòng) cho RA CÙNG MỘT ĐỊNH DẠNG:
-#     <Name>-<Version>.zip   app\ (bản publish) + deploy\ (script VPS của kit) + manifest.json
-#     <Name>-<Version>.manifest.json, SHA256SUMS
-#   Dùng: powershell -File tools\package.ps1 -Repo <thư mục repo ứng dụng> -Version 2026.11.20 [-OutDir <thư mục>] [-Local]
+﻿# DeployKit – đóng gói bản phát hành (Windows PowerShell 5.1+ / pwsh). Cách chính: đóng gói trên máy dev rồi chép zip lên VPS (thư mục
+# <Root>\incoming\), nhấp đúp deploy.cmd. (Workflow GitHub release.yml dùng cùng script, cùng định dạng – tùy chọn.)
+#   powershell -File tools\package.ps1 -Repo <repo ứng dụng> -Test [-Version 2026.11.20.1530] [-OutDir <thư mục>] [-AllowDirty]
+#   Kết quả: <Name>-<Version>.zip  (app\ bản publish + deploy\ script VPS của kit + manifest.json), <Name>-<Version>.manifest.json, SHA256SUMS
+#   -Version  mặc định yyyy.M.d.HHmm (luôn tăng, không trùng)
+#   -Test     chạy lệnh "Test" trong deploy.json trước – lỗi thì không đóng gói
+#   Mã chưa commit: từ chối (gói phải ứng với một commit), trừ khi -AllowDirty (ghi "dirty" trong phiên bản / manifest).
 # Cấu hình ứng dụng: <repo>\deploy\deploy.json (xem README.md của DeployKit).
 param(
     [Parameter(Mandatory)] [string]$Repo,
-    [Parameter(Mandatory)] [string]$Version,
+    [string]$Version,
     [string]$OutDir,
+    [switch]$Test,
+    [switch]$AllowDirty,
     [switch]$Local
 )
 
@@ -17,16 +21,32 @@ $kit = Split-Path $PSScriptRoot -Parent
 $Repo = (Resolve-Path $Repo).Path
 $cfg = Get-Content (Join-Path $Repo 'deploy\deploy.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 if (-not $OutDir) { $OutDir = Join-Path $Repo 'artifacts\release' }
-if ($Version -notmatch '^\d{4}\.\d{1,2}\.\d{1,2}(\.\d+)?$') { throw "Phiên bản '$Version' không đúng dạng yyyy.M.d[.n] (tag v2026.11.20 hoặc v2026.11.20.2)." }
+if (-not $Version) { $Version = Get-Date -Format 'yyyy.M.d.HHmm'; $Local = $true }
+if ($Version -notmatch '^\d{4}\.\d{1,2}\.\d{1,2}(\.\d+)?$') { throw "Phiên bản '$Version' không đúng dạng yyyy.M.d[.n]." }
 
 function Step($t) { Write-Host ''; Write-Host "==> $t" -ForegroundColor Cyan }
+# Windows PowerShell 5.1: lệnh ngoài ghi stderr bị coi là lỗi dừng khi Stop – chạy trong Continue, xét mã thoát
+function Invoke-Native([scriptblock]$block) {
+    $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { & $block } finally { $ErrorActionPreference = $old }
+}
 
 Push-Location $Repo
 try {
-    $sha = (git rev-parse HEAD).Trim()
-    $dirty = [bool](git status --porcelain --untracked-files=no)
-    if ($dirty -and -not $Local) { throw 'Còn thay đổi chưa commit – CI không bao giờ như vậy.' }
-    if ($dirty) { Write-Warning 'Có thay đổi chưa commit – gói dự phòng này ghi "dirty" trong manifest.' }
+    $sha = "$(Invoke-Native { git rev-parse HEAD })".Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $sha) { throw "Không đọc được commit của $Repo (không phải repo git?)." }
+    $dirty = [bool](Invoke-Native { git status --porcelain --untracked-files=no })
+    if ($dirty -and -not $AllowDirty) { throw 'Còn thay đổi chưa commit – commit trước để gói ứng với đúng một commit (hoặc -AllowDirty).' }
+    if ($dirty) { Write-Warning 'Có thay đổi chưa commit – gói ghi "dirty" trong phiên bản / manifest.' }
+
+    if ($Test) {
+        foreach ($cmd in @($cfg.Test)) {
+            if (-not $cmd) { continue }
+            Step "Test: $cmd"
+            Invoke-Native { Invoke-Expression $cmd }
+            if ($LASTEXITCODE -ne 0) { throw "Test lỗi ($cmd) – không đóng gói. (Ứng dụng đang chạy giữ file trong bin\ cũng làm build lỗi – tắt trước.)" }
+        }
+    }
 }
 finally { Pop-Location }
 
@@ -37,8 +57,8 @@ New-Item -ItemType Directory -Force -Path (Join-Path $work 'app') | Out-Null
 
 Step "Publish $($cfg.Project) – $Version ($($sha.Substring(0, 7)))"
 $informational = "$Version+$($sha.Substring(0, 7))$(if ($dirty) { '.dirty' })"
-& dotnet publish (Join-Path $Repo $cfg.Project) -c Release -r win-x64 --self-contained false -o (Join-Path $work 'app') --nologo -v q `
-    "-p:Version=$Version" "-p:InformationalVersion=$informational" "-p:IncludeSourceRevisionInInformationalVersion=false"
+Invoke-Native { & dotnet publish (Join-Path $Repo $cfg.Project) -c Release -r win-x64 --self-contained false -o (Join-Path $work 'app') --nologo -v q `
+    "-p:Version=$Version" "-p:InformationalVersion=$informational" "-p:IncludeSourceRevisionInInformationalVersion=false" } | Where-Object { $_ -notmatch ': warning ' }
 if ($LASTEXITCODE -ne 0) { throw 'Publish thất bại.' }
 
 # Không mang cấu hình / dữ liệu của máy dev: chỉ appsettings.json; thư mục dữ liệu sống nằm ở shared\ trên VPS
@@ -93,5 +113,8 @@ if ($leaked) { Remove-Item -Force $zip; throw "Gói chứa file của máy dev: 
 
 $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
 [IO.File]::WriteAllText((Join-Path $OutDir 'SHA256SUMS'), "$hash  $name.zip`n", [Text.UTF8Encoding]::new($false))
+# Mã kiểm tra đi kèm gói (chép cùng zip lên VPS – deploy.ps1 kiểm khi có: phát hiện file chép thiếu / hỏng)
+[IO.File]::WriteAllText("$zip.sha256", "$hash  $name.zip`n", [Text.UTF8Encoding]::new($false))
 Write-Host ''
 Write-Host ("XONG: {0} ({1:N1} MB, sha256 {2})" -f $zip, ((Get-Item $zip).Length / 1MB), $hash.Substring(0, 12)) -ForegroundColor Green
+Write-Host "Tiếp: chép $name.zip (+ $name.zip.sha256) vào $($cfg.Root)\incoming\ trên VPS rồi nhấp đúp $($cfg.Root)\deploy\deploy.cmd"

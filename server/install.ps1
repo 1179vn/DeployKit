@@ -1,18 +1,17 @@
 ﻿# DeployKit – cài lần đầu trên VPS (Windows PowerShell 5.1+, tự xin quyền Administrator). Chạy từ thư mục deploy\ của một gói phát hành đã giải nén
-# (gói tải tay từ GitHub Release hoặc gói build trên máy dev):
-#   install.cmd -HostName sisunext.vidu.vn
+# (gói đóng gói trên máy dev, chép lên VPS): nhấp đúp install.cmd (hỏi tên miền), hoặc  install.cmd -HostName ten.mien.vn
 # Làm (chạy lại được – bước nào đã có thì giữ nguyên):
-#   1. Bố cục <Root>\releases, shared\<SharedDirs>, deploy\ (chép script + deploy.json); thư mục sao lưu CSDL (BackupDir).
+#   1. Bố cục <Root>\releases, incoming\, shared\<SharedDirs>, deploy\ (chép script + deploy.json); thư mục sao lưu CSDL (BackupDir).
 #   2. App pool (No Managed Code, AlwaysRunning, không tắt khi rảnh, tái chế 3h, nạp hồ sơ người dùng) + biến môi trường của ứng dụng (thư mục dữ liệu ở
 #      shared\ – không nằm trong bản phát hành nên không bao giờ bị ghi đè).
 #   3. Site IIS trỏ <Root>\current, binding http :80 theo tên miền (HTTPS: win-acme sau khi DNS trỏ về – xem README).
 #   4. Quyền: app pool ghi shared\ (+ thư mục sao lưu), đọc releases\; tài khoản SQL Server ghi thư mục sao lưu.
-#   5. Token GitHub chỉ đọc (Contents: Read-only của repo ứng dụng) – mã hóa DPAPI theo máy, chỉ Administrators / SYSTEM đọc được.
+#   5. Chỉ khi tải bản từ GitHub ("Source": "GitHub" trong deploy.json, hoặc -Token): token chỉ đọc, mã hóa DPAPI theo máy.
 #   6. Lịch "sao lưu ra ngoài" (Task Scheduler, mặc định TẮT – bật trong deploy.json → Offsite.Enabled).
 #   7. Cài bản trong gói này (deploy.ps1 -Package).
 param(
     [string]$HostName,
-    [string]$SqlServiceAccount = 'NT Service\MSSQLSERVER',
+    [string]$SqlServiceAccount,
     [switch]$Token,
     [switch]$Yes,
     [switch]$NoPause
@@ -29,7 +28,7 @@ try {
     Write-Host "Cài $($cfg.Name) vào $($layout.Root) (site IIS '$($cfg.SiteName)', app pool '$($layout.Pool)')"
 
     Step 'Bố cục thư mục'
-    foreach ($d in @($layout.Root, $layout.Releases, $layout.Shared, $layout.Deploy)) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
+    foreach ($d in @($layout.Root, $layout.Releases, $layout.Incoming, $layout.Shared, $layout.Deploy)) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
     foreach ($d in @($cfg.SharedDirs)) { New-Item -ItemType Directory -Force -Path (Join-Path $layout.Shared $d) | Out-Null }
     if ($cfg.BackupDir) { New-Item -ItemType Directory -Force -Path $cfg.BackupDir | Out-Null }
     if ($PSScriptRoot.TrimEnd('\') -ne $layout.Deploy) {
@@ -58,7 +57,8 @@ try {
         Invoke-Native { cmd /c mklink /J "`"$($layout.Current)`"" "`"$placeholder`"" } | Out-Null
     }
     if (-not (Test-Path "IIS:\Sites\$($cfg.SiteName)")) {
-        if (-not $HostName) { throw 'Cài lần đầu cần -HostName <tên miền> (binding http :80).' }
+        if (-not $HostName) { $HostName = (Read-Host '   Tên miền của site (ví dụ sisunext.vn)').Trim() }
+        if (-not $HostName) { throw 'Cài lần đầu cần tên miền (binding http :80).' }
         New-Website -Name $cfg.SiteName -PhysicalPath $layout.Current -ApplicationPool $layout.Pool -HostHeader $HostName -Port 80 | Out-Null
         Info "Tạo site $($cfg.SiteName) – http://$HostName"
     }
@@ -71,6 +71,13 @@ try {
 
     Step 'Quyền'
     $identity = "IIS AppPool\$($layout.Pool)"
+    if (-not $SqlServiceAccount) {
+        # Tài khoản dịch vụ SQL Server (ghi file .bak): instance mặc định → MSSQLSERVER, chỉ có Express → MSSQL$SQLEXPRESS
+        $SqlServiceAccount = if (Get-Service 'MSSQLSERVER' -ErrorAction SilentlyContinue) { 'NT Service\MSSQLSERVER' }
+            elseif (Get-Service 'MSSQL$SQLEXPRESS' -ErrorAction SilentlyContinue) { 'NT Service\MSSQL$SQLEXPRESS' }
+            else { 'NT Service\MSSQLSERVER' }
+        Info "Tài khoản dịch vụ SQL Server: $SqlServiceAccount"
+    }
     Invoke-Native { icacls $layout.Shared /grant "${identity}:(OI)(CI)M" /T /Q } | Out-Null
     Invoke-Native { icacls $layout.Releases /grant "${identity}:(OI)(CI)RX" /T /Q } | Out-Null
     if ($cfg.BackupDir) {
@@ -81,13 +88,12 @@ try {
     Invoke-Native { icacls $layout.Deploy /inheritance:r /grant:r 'Administrators:(OI)(CI)F' 'SYSTEM:(OI)(CI)F' /Q } | Out-Null
     Info "${identity}: ghi shared\ + sao lưu, đọc releases\; deploy\ chỉ Administrators"
 
-    Step 'Token GitHub (chỉ đọc)'
-    if ($Token -or -not (Test-Path $layout.Token)) {
+    if ($Token -or ($cfg.Source -eq 'GitHub' -and -not (Test-Path $layout.Token))) {
+        Step 'Token GitHub (chỉ đọc)'
         Write-Host "   Tạo fine-grained token: GitHub → Settings → Developer settings → Fine-grained tokens → repo $($cfg.Repo) → Contents: Read-only."
         $secure = Read-Host '   Dán token (Enter = bỏ qua, dùng -Package)' -AsSecureString
-        if ($secure.Length -gt 0) { Save-Token $layout $secure; Info 'Đã lưu (DPAPI theo máy).' } else { Warn 'Chưa có token – deploy.cmd chỉ dùng được với -Package.' }
+        if ($secure.Length -gt 0) { Save-Token $layout $secure; Info 'Đã lưu (DPAPI theo máy).' } else { Warn 'Chưa có token.' }
     }
-    else { Info 'Đã có.' }
 
     Step 'Lịch sao lưu ra ngoài VPS'
     $taskName = "DeployKit $($cfg.Name) – sao lưu ra ngoài"
@@ -104,7 +110,8 @@ try {
     $deployArgs += @('-Package', $package)
     & powershell @deployArgs
     Write-Host ''
-    Write-Host "Cài xong. Lần sau: $($layout.Deploy)\deploy.cmd (bản mới nhất), rollback.cmd (quay lại)." -ForegroundColor Green
+    Write-Host "Cài xong. Lần sau: chép gói zip (+ .sha256) vào $($layout.Incoming)\ rồi nhấp đúp $($layout.Deploy)\deploy.cmd;" -ForegroundColor Green
+    Write-Host "quay lại bản trước: $($layout.Deploy)\rollback.cmd." -ForegroundColor Green
 }
 catch {
     Write-Host ''

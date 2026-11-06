@@ -1,15 +1,17 @@
 ﻿# DeployKit – phát hành / quay lại trên VPS IIS (Windows PowerShell 5.1+). Bố cục: <Root>\releases\<phiên bản>\, <Root>\current (junction – IIS trỏ
-# vào đây), <Root>\shared\ (dữ liệu sống), <Root>\deploy\ (script này, deploy.json, token.dat, history.jsonl).
-#   deploy.cmd                      bản mới nhất trên GitHub Release
-#   deploy.cmd -Version 2026.11.20  một bản cụ thể
-#   deploy.cmd -Package <zip>       gói tại chỗ (dự phòng – gói build trên máy dev cùng định dạng)
+# vào đây), <Root>\shared\ (dữ liệu sống), <Root>\incoming\ (chép gói zip vào đây), <Root>\deploy\ (script này, deploy.json, history.jsonl).
+#   deploy.cmd                      gói <Tên>-*.zip MỚI NHẤT trong <Root>\incoming\ (chép từ máy dev – cách chính)
+#   deploy.cmd -Package <zip>       một gói chỉ định (file zip hoặc thư mục gói đã giải nén)
+#   deploy.cmd -GitHub [-Version x] bản trên GitHub Release (tùy chọn – cần "Source": "GitHub" hoặc token đã lưu)
 #   rollback.cmd [-To <phiên bản>]  quay lại bản trước (hoặc bản chỉ định) – chỉ đổi khe, không chép file
 # Khác: -Yes (không hỏi), -NoPause.
-# Các bước: tải + kiểm SHA-256 → giải nén vào releases\<ver> (không bao giờ chép đè) → kiểm tra máy → --preflight của bản mới (chỉ đọc) →
-# dừng app pool → đổi junction → khởi động → chờ /health đúng phiên bản + sẵn sàng → lỗi thì tự đổi về bản trước. Ghi history.jsonl, giữ N bản.
+# Các bước: kiểm SHA-256 (file .sha256 cạnh gói) → giải nén vào releases\<ver> (không bao giờ chép đè) → kiểm tra máy → --preflight của bản mới
+# (chỉ đọc) → dừng app pool → đổi junction → khởi động → chờ /health đúng phiên bản + sẵn sàng → lỗi thì tự đổi về bản trước. Ghi history.jsonl,
+# giữ N bản; gói đã cài chuyển sang incoming\da-cai\.
 param(
     [string]$Version,
     [string]$Package,
+    [switch]$GitHub,
     [switch]$Rollback,
     [string]$To,
     [switch]$Yes,
@@ -44,7 +46,7 @@ try {
 
     # -------------------------------------------------------------- chọn bản
     if ($Rollback) {
-        $all = @(Get-ChildItem $layout.Releases -Directory | Where-Object { $_.Name -notlike '.*' -and (Test-Path (Join-Path $_.FullName 'app')) } | Sort-Object Name -Descending | ForEach-Object Name)
+        $all = @(Get-Releases $layout)
         if ($To) { $target = $To }
         else { $target = $all | Where-Object { $_ -ne $from } | Select-Object -First 1 }
         if (-not $target -or $all -notcontains $target) { throw "Không có bản để quay lại$(if ($To) { " ($To)" })." }
@@ -54,11 +56,31 @@ try {
         Step 'Lấy bản phát hành'
         $tmp = Join-Path $env:TEMP ("deploykit-" + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $tmp | Out-Null
+        $incomingZip = $null; $zip = $null
         if ($Package) {
             $zip = (Resolve-Path $Package).Path   # file zip, hoặc thư mục gói đã giải nén (install.cmd)
-            Warn 'Gói tại chỗ (không qua GitHub Release).'
         }
-        else {
+        elseif (-not $GitHub -and $cfg.Source -ne 'GitHub') {
+            # Cách chính: gói chép từ máy dev vào incoming\ – lấy gói mới nhất (theo phiên bản trong tên)
+            New-Item -ItemType Directory -Force -Path $layout.Incoming | Out-Null
+            $candidates = @(Get-ChildItem $layout.Incoming -File -Filter "$($cfg.Name)-*.zip")
+            if (-not $candidates) { throw "Chưa có gói $($cfg.Name)-*.zip trong $($layout.Incoming) – chép gói từ máy dev vào đó rồi chạy lại." }
+            $incomingZip = $candidates | Sort-Object { ConvertTo-VersionKey ($_.BaseName.Substring($cfg.Name.Length + 1)) } -Descending | Select-Object -First 1
+            $zip = $incomingZip.FullName
+            if ($candidates.Count -gt 1) { Info "Có $($candidates.Count) gói trong incoming\ – chọn bản mới nhất." }
+        }
+        if ($zip -and (Test-Path $zip -PathType Leaf)) {
+            Info "Gói: $zip ($([math]::Round((Get-Item $zip).Length / 1MB, 1)) MB)"
+            $sumFile = "$zip.sha256"
+            if (Test-Path $sumFile) {
+                $expected = ((Get-Content $sumFile -TotalCount 1) -split '\s+')[0].ToLowerInvariant()
+                $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+                if ($expected -ne $actual) { throw 'Mã kiểm tra SHA-256 không khớp – gói chép thiếu / hỏng. Chép lại gói (cùng file .sha256) rồi chạy lại.' }
+                Info 'SHA-256 khớp.'
+            }
+            else { Warn "Không có $(Split-Path $sumFile -Leaf) cạnh gói – không kiểm được gói chép có đủ không." }
+        }
+        if (-not $zip) {
             $token = Read-Token $layout
             if (-not $token) { throw "Chưa có token GitHub (chạy install.cmd -Token) – hoặc dùng -Package <zip>." }
             $headers = @{ Authorization = "Bearer $token"; Accept = 'application/vnd.github+json'; 'User-Agent' = 'DeployKit' }
@@ -85,6 +107,8 @@ try {
             Copy-Item (Join-Path $zip '*') $staging -Recurse
         }
         else { [IO.Compression.ZipFile]::ExtractToDirectory($zip, $staging) }
+        # Bỏ cờ "tải từ Internet / máy khác" (chép qua Remote Desktop, trình duyệt) – tránh hộp cảnh báo khi chạy script của bản này
+        Get-ChildItem $staging -Recurse -File | Unblock-File -ErrorAction SilentlyContinue
         $manifest = Get-Content (Join-Path $staging 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
         if ($manifest.Name -ne $cfg.Name) { Remove-Item -Recurse -Force $staging; throw "Gói của '$($manifest.Name)', không phải '$($cfg.Name)'." }
         $target = $manifest.Version
@@ -95,7 +119,7 @@ try {
         }
         Rename-Item $staging $dest
         Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
-        Info "Bản $target ($($manifest.InformationalVersion), build $($manifest.BuiltAt)$(if ($manifest.Local) { ', GÓI MÁY DEV' }))"
+        Info "Bản $target ($($manifest.InformationalVersion), build $($manifest.BuiltAt)$(if ($manifest.BuiltOn) { ", đóng gói trên $($manifest.BuiltOn)" })$(if ($manifest.Dirty) { ' – CÓ THAY ĐỔI CHƯA COMMIT' }))"
 
         # -------------------------------------------------------------- kiểm tra máy
         Step 'Kiểm tra máy chủ'
@@ -165,9 +189,17 @@ try {
             # Script của bản mới thay script đang dùng (giữ token, lịch sử)
             Copy-Item (Join-Path (Join-Path $layout.Releases $target) 'deploy\*') $layout.Deploy -Recurse -Force -Exclude 'token.dat', 'history.jsonl'
             $keep = if ($cfg.KeepReleases) { [int]$cfg.KeepReleases } else { 5 }
-            Get-ChildItem $layout.Releases -Directory | Where-Object { $_.Name -notin @($target, $from) -and $_.Name -notlike '.*' } |
-                Sort-Object Name -Descending | Select-Object -Skip ([Math]::Max(0, $keep - 2)) |
-                ForEach-Object { Remove-Item -Recurse -Force $_.FullName; Info "xóa bản cũ $($_.Name)" }
+            Get-Releases $layout | Where-Object { $_ -notin @($target, $from) } | Select-Object -Skip ([Math]::Max(0, $keep - 2)) |
+                ForEach-Object { Remove-Item -Recurse -Force (Join-Path $layout.Releases $_); Info "xóa bản cũ $_" }
+            # Gói đã cài: chuyển khỏi incoming\ (lần sau không chọn lại), giữ 5 gói gần nhất
+            if ($incomingZip) {
+                $done = Join-Path $layout.Incoming 'da-cai'
+                New-Item -ItemType Directory -Force -Path $done | Out-Null
+                Move-Item $incomingZip.FullName $done -Force
+                if (Test-Path "$($incomingZip.FullName).sha256") { Move-Item "$($incomingZip.FullName).sha256" $done -Force }
+                Get-ChildItem $done -File -Filter '*.zip' | Sort-Object LastWriteTime -Descending | Select-Object -Skip 5 |
+                    ForEach-Object { Remove-Item -Force $_.FullName, "$($_.FullName).sha256" -ErrorAction SilentlyContinue }
+            }
         }
         Write-Host ''
         Write-Host "XONG – $($cfg.Name) $target đang chạy ($($entry.seconds) giây)." -ForegroundColor Green
