@@ -55,7 +55,7 @@ try {
         # Khe tạm trỏ thư mục trống để tạo site; deploy.ps1 đổi sang bản thật
         $placeholder = Join-Path $layout.Releases '.chua-co-ban\app'
         New-Item -ItemType Directory -Force -Path $placeholder | Out-Null
-        cmd /c mklink /J "`"$($layout.Current)`"" "`"$placeholder`"" | Out-Null
+        Invoke-Native { cmd /c mklink /J "`"$($layout.Current)`"" "`"$placeholder`"" } | Out-Null
     }
     if (-not (Test-Path "IIS:\Sites\$($cfg.SiteName)")) {
         if (-not $HostName) { throw 'Cài lần đầu cần -HostName <tên miền> (binding http :80).' }
@@ -71,14 +71,14 @@ try {
 
     Step 'Quyền'
     $identity = "IIS AppPool\$($layout.Pool)"
-    icacls $layout.Shared /grant "${identity}:(OI)(CI)M" /T /Q | Out-Null
-    icacls $layout.Releases /grant "${identity}:(OI)(CI)RX" /T /Q | Out-Null
+    Invoke-Native { icacls $layout.Shared /grant "${identity}:(OI)(CI)M" /T /Q } | Out-Null
+    Invoke-Native { icacls $layout.Releases /grant "${identity}:(OI)(CI)RX" /T /Q } | Out-Null
     if ($cfg.BackupDir) {
-        icacls $cfg.BackupDir /grant "${identity}:(OI)(CI)M" /T /Q | Out-Null
-        icacls $cfg.BackupDir /grant "${SqlServiceAccount}:(OI)(CI)M" /T /Q 2>$null | Out-Null
+        Invoke-Native { icacls $cfg.BackupDir /grant "${identity}:(OI)(CI)M" /T /Q } | Out-Null
+        Invoke-Native { icacls $cfg.BackupDir /grant "${SqlServiceAccount}:(OI)(CI)M" /T /Q } | Out-Null
         if ($LASTEXITCODE -ne 0) { Warn "Không cấp được quyền ghi $($cfg.BackupDir) cho '$SqlServiceAccount' – instance khác: -SqlServiceAccount 'NT Service\MSSQL`$SQLEXPRESS'." }
     }
-    icacls $layout.Deploy /inheritance:r /grant:r 'Administrators:(OI)(CI)F' 'SYSTEM:(OI)(CI)F' /Q | Out-Null
+    Invoke-Native { icacls $layout.Deploy /inheritance:r /grant:r 'Administrators:(OI)(CI)F' 'SYSTEM:(OI)(CI)F' /Q } | Out-Null
     Info "${identity}: ghi shared\ + sao lưu, đọc releases\; deploy\ chỉ Administrators"
 
     Step 'Token GitHub (chỉ đọc)'

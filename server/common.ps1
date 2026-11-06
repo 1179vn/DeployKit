@@ -4,6 +4,15 @@ $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
+# Lệnh ngoài (cmd, appcmd, icacls…): Windows PowerShell 5.1 coi MỌI dòng stderr là lỗi dừng script khi ErrorActionPreference = Stop (kể cả đã chuyển
+# hướng 2>$null) – chạy trong Continue, gom stderr thành chữ; người gọi tự xét $LASTEXITCODE.
+function Invoke-Native([scriptblock]$block) {
+    $old = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & $block 2>&1 | ForEach-Object { "$_" } }
+    finally { $ErrorActionPreference = $old }
+}
+
 function Step($text) { Write-Host ''; Write-Host "==> $text" -ForegroundColor Cyan }
 function Info($text) { Write-Host "   $text" }
 function Warn($text) { Write-Host "   ! $text" -ForegroundColor Yellow }
@@ -57,9 +66,9 @@ function Get-AppEnvironment($cfg, $layout) {
 function Set-CurrentRelease($layout, [string]$version) {
     $target = Join-Path $layout.Releases $version
     if (-not (Test-Path (Join-Path $target 'app'))) { throw "Không có bản $version trong $($layout.Releases)." }
-    if (Test-Path $layout.Current) { cmd /c rmdir "`"$($layout.Current)`"" | Out-Null }   # chỉ gỡ junction, không đụng thư mục đích
-    cmd /c mklink /J "`"$($layout.Current)`"" "`"$target\app`"" | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Không tạo được junction $($layout.Current) → $target\app." }
+    if (Test-Path $layout.Current) { Invoke-Native { cmd /c rmdir "`"$($layout.Current)`"" } | Out-Null }   # chỉ gỡ junction, không đụng thư mục đích
+    $out = Invoke-Native { cmd /c mklink /J "`"$($layout.Current)`"" "`"$target\app`"" }
+    if ($LASTEXITCODE -ne 0) { throw "Không tạo được junction $($layout.Current) → $target\app: $out" }
 }
 
 function Get-CurrentVersionFromJunction($layout) {
@@ -91,9 +100,10 @@ function Stop-App($layout) {
 function Set-PoolEnvironment($layout, $vars) {
     $appcmd = Join-Path $env:windir 'System32\inetsrv\appcmd.exe'
     foreach ($name in $vars.Keys) {
-        & $appcmd set config -section:system.applicationHost/applicationPools "/-[name='$($layout.Pool)'].environmentVariables.[name='$name']" /commit:apphost 2>$null | Out-Null
-        & $appcmd set config -section:system.applicationHost/applicationPools "/+[name='$($layout.Pool)'].environmentVariables.[name='$name',value='$($vars[$name])']" /commit:apphost | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "Không đặt được biến môi trường $name cho app pool $($layout.Pool)." }
+        # Gỡ giá trị cũ (chưa có thì appcmd báo lỗi – bỏ qua) rồi thêm giá trị mới
+        Invoke-Native { & $appcmd set config -section:system.applicationHost/applicationPools "/-[name='$($layout.Pool)'].environmentVariables.[name='$name']" /commit:apphost } | Out-Null
+        $out = Invoke-Native { & $appcmd set config -section:system.applicationHost/applicationPools "/+[name='$($layout.Pool)'].environmentVariables.[name='$name',value='$($vars[$name])']" /commit:apphost }
+        if ($LASTEXITCODE -ne 0) { throw "Không đặt được biến môi trường $name cho app pool $($layout.Pool): $out" }
     }
 }
 
@@ -149,7 +159,7 @@ function Save-Token($layout, [Security.SecureString]$secure) {
     Add-Type -AssemblyName System.Security
     $bytes = [Security.Cryptography.ProtectedData]::Protect([Text.Encoding]::UTF8.GetBytes($plain), $null, 'LocalMachine')
     [IO.File]::WriteAllBytes($layout.Token, $bytes)
-    icacls $layout.Token /inheritance:r /grant:r 'Administrators:F' 'SYSTEM:F' "$([Security.Principal.WindowsIdentity]::GetCurrent().Name):F" | Out-Null
+    Invoke-Native { icacls $layout.Token /inheritance:r /grant:r 'Administrators:F' 'SYSTEM:F' "$([Security.Principal.WindowsIdentity]::GetCurrent().Name):F" } | Out-Null
 }
 
 function Read-Token($layout) {
