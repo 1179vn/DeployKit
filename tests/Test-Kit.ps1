@@ -28,7 +28,7 @@ foreach ($f in Get-ChildItem $kit -Recurse -Filter *.ps1 | Where-Object FullName
 . (Join-Path $kit 'server\common.ps1')
 $root = Join-Path $env:TEMP ('deploykit-test-' + [guid]::NewGuid().ToString('N'))
 $cfg = [pscustomobject]@{ Name = 'Thu'; AppDll = 'Thu.dll'; Root = $root; SiteName = 'Thu'; HealthPath = '/health'
-    Environment = [pscustomobject]@{ APP_DATA = '{shared}\App_Data'; KHAC = 'giu nguyen' } }
+    Environment = [pscustomobject]@{ APP_DATA = '{shared}\App_Data'; DB = '{root}\db'; KHAC = 'giu nguyen' } }
 $layout = Get-Layout $cfg
 New-Item -ItemType Directory -Force -Path $layout.Releases, $layout.Deploy | Out-Null
 
@@ -62,6 +62,7 @@ Write-Host 'Biến môi trường, token'
 Check '{shared} → <Root>\shared' {
     $vars = Get-AppEnvironment $cfg $layout
     Equal (Join-Path $root 'shared\App_Data') $vars['APP_DATA']
+    Equal (Join-Path $root 'db') $vars['DB']
     Equal 'giu nguyen' $vars['KHAC']
 }
 Check 'token DPAPI theo máy: ghi / đọc lại' {

@@ -66,7 +66,7 @@ function Get-Layout($cfg) {
 function Get-AppEnvironment($cfg, $layout) {
     $vars = [ordered]@{}
     if ($cfg.Environment) {
-        foreach ($p in $cfg.Environment.PSObject.Properties) { $vars[$p.Name] = ([string]$p.Value).Replace('{shared}', $layout.Shared) }
+        foreach ($p in $cfg.Environment.PSObject.Properties) { $vars[$p.Name] = ([string]$p.Value).Replace('{shared}', $layout.Shared).Replace('{root}', $layout.Root) }
     }
     return $vars
 }

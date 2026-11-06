@@ -34,6 +34,7 @@ VERSION                         phiên bản kit (ghi vào manifest)
 <Root>\current  →  releases\<phiên bản>\app   (junction; site IIS trỏ vào đây)
 <Root>\shared\<SharedDirs>         dữ liệu sống (App_Data, logs) – ứng dụng đọc qua biến môi trường của app pool
 <Root>\deploy\                     script (tự cập nhật theo bản đang chạy), deploy.json, history.jsonl
+<Root>\db\, <Root>\backup\          (tùy ứng dụng – DataDir / BackupDir trong deploy.json) file CSDL, bản sao lưu
 ```
 
 ## Hợp đồng ứng dụng (mỗi ứng dụng tự làm một lần)
@@ -61,14 +62,21 @@ VERSION                         phiên bản kit (ghi vào manifest)
   "HealthPath": "/health",
   "Preflight": "--preflight",
   "SharedDirs": ["App_Data", "logs"],
-  "Environment": { "SISUNEXT_APPDATA": "{shared}\\App_Data" },
-  "BackupDir": "C:\\Backup\\SiSuNext",
+  "Environment": {
+    "SISUNEXT_APPDATA": "{shared}\\App_Data",
+    "Setup__DefaultDataDirectory": "{root}\\db",
+    "Setup__DefaultBackupDirectory": "{root}\\backup"
+  },
+  "DataDir": "C:\\Apps\\SiSuNext\\db",
+  "BackupDir": "C:\\Apps\\SiSuNext\\backup",
   "KeepReleases": 5,
   "UpgradeTimeoutMinutes": 30,
   "Offsite": { "Enabled": false, "Remote": "onedrive:Backup/SiSuNext", "KeepDays": 30 }
 }
 ```
 
+`{shared}` = `<Root>\shared`, `{root}` = `<Root>`. `DataDir` (file CSDL) / `BackupDir` (sao lưu): `install.cmd` tạo và cấp quyền cho app pool + tài khoản dịch vụ
+SQL Server – để mọi thứ của một ứng dụng nằm trong `<Root>`.
 `"Source": "GitHub"` (+ `DotnetVersion`, `Prepare` cho runner) = tải bản từ GitHub Release bằng token chỉ đọc – tùy chọn, không dùng mặc định.
 
 ## Dùng

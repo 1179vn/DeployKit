@@ -1,11 +1,11 @@
 ﻿# DeployKit – cài lần đầu trên VPS (Windows PowerShell 5.1+, tự xin quyền Administrator). Chạy từ thư mục deploy\ của một gói phát hành đã giải nén
 # (gói đóng gói trên máy dev, chép lên VPS): nhấp đúp install.cmd (hỏi tên miền), hoặc  install.cmd -HostName ten.mien.vn
 # Làm (chạy lại được – bước nào đã có thì giữ nguyên):
-#   1. Bố cục <Root>\releases, incoming\, shared\<SharedDirs>, deploy\ (chép script + deploy.json); thư mục sao lưu CSDL (BackupDir).
+#   1. Bố cục <Root>\releases, incoming\, shared\<SharedDirs>, deploy\ (chép script + deploy.json); thư mục file CSDL (DataDir) và sao lưu (BackupDir).
 #   2. App pool (No Managed Code, AlwaysRunning, không tắt khi rảnh, tái chế 3h, nạp hồ sơ người dùng) + biến môi trường của ứng dụng (thư mục dữ liệu ở
 #      shared\ – không nằm trong bản phát hành nên không bao giờ bị ghi đè).
 #   3. Site IIS trỏ <Root>\current, binding http :80 theo tên miền (HTTPS: win-acme sau khi DNS trỏ về – xem README).
-#   4. Quyền: app pool ghi shared\ (+ thư mục sao lưu), đọc releases\; tài khoản SQL Server ghi thư mục sao lưu.
+#   4. Quyền: app pool ghi shared\, DataDir, BackupDir, đọc releases\; tài khoản dịch vụ SQL Server toàn quyền DataDir, BackupDir.
 #   5. Chỉ khi tải bản từ GitHub ("Source": "GitHub" trong deploy.json, hoặc -Token): token chỉ đọc, mã hóa DPAPI theo máy.
 #   6. Lịch "sao lưu ra ngoài" (Task Scheduler, mặc định TẮT – bật trong deploy.json → Offsite.Enabled).
 #   7. Cài bản trong gói này (deploy.ps1 -Package).
@@ -30,7 +30,7 @@ try {
     Step 'Bố cục thư mục'
     foreach ($d in @($layout.Root, $layout.Releases, $layout.Incoming, $layout.Shared, $layout.Deploy)) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
     foreach ($d in @($cfg.SharedDirs)) { New-Item -ItemType Directory -Force -Path (Join-Path $layout.Shared $d) | Out-Null }
-    if ($cfg.BackupDir) { New-Item -ItemType Directory -Force -Path $cfg.BackupDir | Out-Null }
+    foreach ($d in @($cfg.DataDir, $cfg.BackupDir)) { if ($d) { New-Item -ItemType Directory -Force -Path $d | Out-Null } }
     if ($PSScriptRoot.TrimEnd('\') -ne $layout.Deploy) {
         Copy-Item (Join-Path $PSScriptRoot '*') $layout.Deploy -Recurse -Force -Exclude 'token.dat', 'history.jsonl'
     }
@@ -80,13 +80,15 @@ try {
     }
     Invoke-Native { icacls $layout.Shared /grant "${identity}:(OI)(CI)M" /T /Q } | Out-Null
     Invoke-Native { icacls $layout.Releases /grant "${identity}:(OI)(CI)RX" /T /Q } | Out-Null
-    if ($cfg.BackupDir) {
-        Invoke-Native { icacls $cfg.BackupDir /grant "${identity}:(OI)(CI)M" /T /Q } | Out-Null
-        Invoke-Native { icacls $cfg.BackupDir /grant "${SqlServiceAccount}:(OI)(CI)M" /T /Q } | Out-Null
-        if ($LASTEXITCODE -ne 0) { Warn "Không cấp được quyền ghi $($cfg.BackupDir) cho '$SqlServiceAccount' – instance khác: -SqlServiceAccount 'NT Service\MSSQL`$SQLEXPRESS'." }
+    # File CSDL (.mdf / .ldf) và sao lưu (.bak): SQL Server ghi (tài khoản dịch vụ), ứng dụng tạo thư mục con / dọn bản cũ (app pool)
+    foreach ($d in @($cfg.DataDir, $cfg.BackupDir)) {
+        if (-not $d) { continue }
+        Invoke-Native { icacls $d /grant "${identity}:(OI)(CI)M" /T /Q } | Out-Null
+        Invoke-Native { icacls $d /grant "${SqlServiceAccount}:(OI)(CI)F" /T /Q } | Out-Null
+        if ($LASTEXITCODE -ne 0) { Warn "Không cấp được quyền ghi $d cho '$SqlServiceAccount' – instance tên khác: -SqlServiceAccount 'NT Service\MSSQL`$<TÊN>'." }
     }
     Invoke-Native { icacls $layout.Deploy /inheritance:r /grant:r 'Administrators:(OI)(CI)F' 'SYSTEM:(OI)(CI)F' /Q } | Out-Null
-    Info "${identity}: ghi shared\ + sao lưu, đọc releases\; deploy\ chỉ Administrators"
+    Info "${identity}: ghi shared\, file CSDL, sao lưu; đọc releases\. ${SqlServiceAccount}: file CSDL, sao lưu. deploy\ chỉ Administrators"
 
     if ($Token -or ($cfg.Source -eq 'GitHub' -and -not (Test-Path $layout.Token))) {
         Step 'Token GitHub (chỉ đọc)'
