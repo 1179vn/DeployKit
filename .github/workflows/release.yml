@@ -1,0 +1,91 @@
+# DeployKit – workflow dùng lại: đẩy tag vYYYY.M.D[.n] ở repo ứng dụng → build, toàn bộ test, đóng gói, GitHub Release (zip + manifest + SHA256SUMS).
+# Repo ứng dụng gọi (.github/workflows/release.yml):
+#   on: { push: { tags: ['v*'] } }
+#   jobs:
+#     release:
+#       uses: 1179vn/DeployKit/.github/workflows/release.yml@v1
+#       permissions: { contents: write }
+# Cấu hình của ứng dụng: deploy/deploy.json (DotnetVersion, Prepare, Test, Project, AppDll…) – xem README.md.
+name: Release (DeployKit)
+
+on:
+  workflow_call:
+    inputs:
+      config:
+        description: Đường dẫn deploy.json trong repo ứng dụng
+        type: string
+        default: deploy/deploy.json
+      kit-ref:
+        description: Phiên bản DeployKit đóng kèm (script VPS) – nên trùng tag ở dòng "uses"
+        type: string
+        default: v1
+
+jobs:
+  release:
+    name: Build, test, đóng gói, phát hành
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    env:
+      DOTNET_NOLOGO: true
+      DOTNET_CLI_TELEMETRY_OPTOUT: true
+    steps:
+      - name: Chỉ chạy từ tag phiên bản
+        shell: pwsh
+        run: |
+          if ('${{ github.ref_type }}' -ne 'tag' -or '${{ github.ref_name }}' -notmatch '^v\d{4}\.\d{1,2}\.\d{1,2}(\.\d+)?$') {
+            throw "Phát hành chỉ từ tag dạng v2026.11.20 (hoặc v2026.11.20.2) – đang ở '${{ github.ref_name }}'."
+          }
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/checkout@v4
+        with:
+          repository: 1179vn/DeployKit
+          ref: ${{ inputs.kit-ref }}
+          path: .deploykit
+
+      - name: Đọc cấu hình
+        id: cfg
+        shell: pwsh
+        run: |
+          $cfg = Get-Content '${{ inputs.config }}' -Raw -Encoding UTF8 | ConvertFrom-Json
+          "name=$($cfg.Name)" >> $env:GITHUB_OUTPUT
+          "dotnet=$(if ($cfg.DotnetVersion) { $cfg.DotnetVersion } else { '10.0.x' })" >> $env:GITHUB_OUTPUT
+          "version=$('${{ github.ref_name }}'.Substring(1))" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ steps.cfg.outputs.dotnet }}
+
+      - name: Chuẩn bị (Prepare trong deploy.json)
+        shell: pwsh
+        run: |
+          $cfg = Get-Content '${{ inputs.config }}' -Raw -Encoding UTF8 | ConvertFrom-Json
+          foreach ($cmd in @($cfg.Prepare)) { if ($cmd) { Write-Host "> $cmd"; Invoke-Expression $cmd; if ($LASTEXITCODE) { throw "Lỗi: $cmd" } } }
+
+      - name: Test (Test trong deploy.json) – đỏ thì không có bản phát hành
+        shell: pwsh
+        run: |
+          $cfg = Get-Content '${{ inputs.config }}' -Raw -Encoding UTF8 | ConvertFrom-Json
+          foreach ($cmd in @($cfg.Test)) { if ($cmd) { Write-Host "> $cmd"; Invoke-Expression $cmd; if ($LASTEXITCODE) { throw "Test lỗi: $cmd" } } }
+
+      - name: Đóng gói
+        shell: pwsh
+        run: ./.deploykit/tools/package.ps1 -Repo . -Version ${{ steps.cfg.outputs.version }} -OutDir out
+
+      - name: GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = '${{ github.ref_name }}'
+          $previous = git describe --tags --abbrev=0 "$tag^" 2>$null
+          $range = if ($previous) { "$previous..$tag" } else { $tag }
+          $notes = @("Phiên bản ${{ steps.cfg.outputs.version }} – DeployKit ${{ inputs.kit-ref }}", '', 'Thay đổi:') + (git log --pretty='- %s' $range)
+          [IO.File]::WriteAllLines("$PWD/out/NOTES.md", $notes, [Text.UTF8Encoding]::new($false))
+          gh release create $tag (Get-ChildItem out -File -Exclude NOTES.md | ForEach-Object FullName) --title "${{ steps.cfg.outputs.name }} ${{ steps.cfg.outputs.version }}" --notes-file out/NOTES.md
+          if ($LASTEXITCODE) { throw 'Không tạo được release.' }
