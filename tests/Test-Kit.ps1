@@ -78,13 +78,13 @@ if ($Repo) {
     $appCfg = Get-Content (Join-Path $Repo 'deploy\deploy.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     Check 'package.ps1 (gói máy dev)' { & (Join-Path $kit 'tools\package.ps1') -Repo $Repo -Version '2099.1.1' -OutDir $out -Local -AllowDirty | Out-Host }
     Check 'file .sha256 đi kèm gói khớp' {
-        Equal (Get-FileHash (Join-Path $out "$($appCfg.Name)-2099.1.1.zip") -Algorithm SHA256).Hash.ToLowerInvariant() `
+        Equal (Get-Sha256 (Join-Path $out "$($appCfg.Name)-2099.1.1.zip")) `
             ((Get-Content (Join-Path $out "$($appCfg.Name)-2099.1.1.zip.sha256")) -split '\s+')[0]
     }
     $zip = Join-Path $out "$($appCfg.Name)-2099.1.1.zip"
     Check 'SHA256SUMS khớp' {
         $line = Get-Content (Join-Path $out 'SHA256SUMS')
-        Equal (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant() ($line -split '\s+')[0]
+        Equal (Get-Sha256 $zip) ($line -split '\s+')[0]
     }
     $x = Join-Path $out 'x'
     Add-Type -AssemblyName System.IO.Compression.FileSystem

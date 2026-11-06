@@ -13,6 +13,14 @@ function Invoke-Native([scriptblock]$block) {
     finally { $ErrorActionPreference = $old }
 }
 
+# SHA-256 bằng .NET – không dùng Get-FileHash (module Utility không nạp được khi Windows PowerShell 5.1 chạy từ PowerShell 7: PSModulePath kế thừa)
+function Get-Sha256([string]$path) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $stream = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
+    try { return ([BitConverter]::ToString($sha.ComputeHash($stream)) -replace '-', '').ToLowerInvariant() }
+    finally { $stream.Dispose(); $sha.Dispose() }
+}
+
 function Step($text) { Write-Host ''; Write-Host "==> $text" -ForegroundColor Cyan }
 function Info($text) { Write-Host "   $text" }
 function Warn($text) { Write-Host "   ! $text" -ForegroundColor Yellow }

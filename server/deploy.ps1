@@ -74,7 +74,7 @@ try {
             $sumFile = "$zip.sha256"
             if (Test-Path $sumFile) {
                 $expected = ((Get-Content $sumFile -TotalCount 1) -split '\s+')[0].ToLowerInvariant()
-                $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+                $actual = (Get-Sha256 $zip)
                 if ($expected -ne $actual) { throw 'Mã kiểm tra SHA-256 không khớp – gói chép thiếu / hỏng. Chép lại gói (cùng file .sha256) rồi chạy lại.' }
                 Info 'SHA-256 khớp.'
             }
@@ -95,7 +95,7 @@ try {
             Invoke-WebRequest -Uri $zipAsset.url -Headers $dl -OutFile $zip -UseBasicParsing
             Invoke-WebRequest -Uri $sumAsset.url -Headers $dl -OutFile (Join-Path $tmp 'SHA256SUMS') -UseBasicParsing
             $expected = ((Get-Content (Join-Path $tmp 'SHA256SUMS') | Where-Object { $_ -match [regex]::Escape($zipAsset.name) }) -split '\s+')[0]
-            $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+            $actual = (Get-Sha256 $zip)
             if ($expected -ne $actual) { throw "Mã kiểm tra SHA-256 không khớp – gói hỏng / bị sửa. Không cài." }
             Info 'SHA-256 khớp.'
         }
@@ -108,7 +108,7 @@ try {
         }
         else { [IO.Compression.ZipFile]::ExtractToDirectory($zip, $staging) }
         # Bỏ cờ "tải từ Internet / máy khác" (chép qua Remote Desktop, trình duyệt) – tránh hộp cảnh báo khi chạy script của bản này
-        Get-ChildItem $staging -Recurse -File | Unblock-File -ErrorAction SilentlyContinue
+        Get-ChildItem $staging -Recurse -File | ForEach-Object { Remove-Item -LiteralPath $_.FullName -Stream Zone.Identifier -ErrorAction SilentlyContinue }
         $manifest = Get-Content (Join-Path $staging 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
         if ($manifest.Name -ne $cfg.Name) { Remove-Item -Recurse -Force $staging; throw "Gói của '$($manifest.Name)', không phải '$($cfg.Name)'." }
         $target = $manifest.Version

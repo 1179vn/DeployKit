@@ -1,3 +1,5 @@
 @echo off
-rem DeployKit - nhap dup de cai ban moi nhat tu GitHub Release (tu xin quyen Administrator). Them tham so: -Version 2026.11.20 | -Package <zip>
+rem DeployKit - nhap dup de cai goi moi nhat trong <Root>\incoming\ (tu xin quyen Administrator). Them: -Package <zip>
+rem PSModulePath ke thua tu PowerShell 7 lam Windows PowerShell nap sai module - xoa de dung mac dinh
+set "PSModulePath="
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0deploy.ps1" %*

@@ -26,6 +26,13 @@ if ($Version -notmatch '^\d{4}\.\d{1,2}\.\d{1,2}(\.\d+)?$') { throw "Phiên bả
 
 function Step($t) { Write-Host ''; Write-Host "==> $t" -ForegroundColor Cyan }
 # Windows PowerShell 5.1: lệnh ngoài ghi stderr bị coi là lỗi dừng khi Stop – chạy trong Continue, xét mã thoát
+# SHA-256 bằng .NET – Get-FileHash không nạp được khi Windows PowerShell 5.1 chạy từ PowerShell 7 (PSModulePath kế thừa)
+function Get-Sha256([string]$path) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $stream = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
+    try { return ([BitConverter]::ToString($sha.ComputeHash($stream)) -replace '-', '').ToLowerInvariant() }
+    finally { $stream.Dispose(); $sha.Dispose() }
+}
 function Invoke-Native([scriptblock]$block) {
     $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     try { & $block } finally { $ErrorActionPreference = $old }
@@ -100,18 +107,28 @@ if (Test-Path $zip) { Remove-Item -Force $zip }
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 [IO.Compression.ZipFile]::CreateFromDirectory($work, $zip, [IO.Compression.CompressionLevel]::Optimal, $false)
 Copy-Item (Join-Path $work 'manifest.json') (Join-Path $OutDir "$name.manifest.json") -Force
-Remove-Item -Recurse -Force $work
+
+# Trình diệt virus hay giữ tạm file vừa tạo (DLL publish, zip 50+ MB) → xóa / đọc lỗi "đang được dùng": thử lại vài lần
+function Retry([scriptblock]$block, [string]$what) {
+    for ($i = 1; ; $i++) {
+        try { return & $block }
+        catch { if ($i -ge 10) { throw "$what không được sau 10 lần thử: $($_.Exception.Message)" }; Start-Sleep -Seconds 2 }
+    }
+}
+Retry { Remove-Item -Recurse -Force $work } "Xóa thư mục tạm $work"
 
 # Tự kiểm tra gói
-$archive = [IO.Compression.ZipFile]::OpenRead($zip)
-try { $entries = @($archive.Entries | ForEach-Object { $_.FullName -replace '\\', '/' }) } finally { $archive.Dispose() }
+$entries = Retry {
+    $archive = [IO.Compression.ZipFile]::OpenRead($zip)
+    try { @($archive.Entries | ForEach-Object { $_.FullName -replace '\\', '/' }) } finally { $archive.Dispose() }
+} 'Đọc lại gói'
 $need = @('manifest.json', 'deploy/deploy.ps1', 'deploy/deploy.cmd', 'deploy/rollback.cmd', 'deploy/install.ps1', 'deploy/deploy.json', "app/$($cfg.AppDll)")
 $missing = $need | Where-Object { $entries -notcontains $_ }
 if ($missing) { Remove-Item -Force $zip; throw "Gói thiếu: $($missing -join ', ')" }
 $leaked = @($entries | Where-Object { $_ -match '^app/(appsettings\.(Development|Production|Staging)\.json|App_Data/)' })
 if ($leaked) { Remove-Item -Force $zip; throw "Gói chứa file của máy dev: $($leaked -join ', ')" }
 
-$hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+$hash = Retry { Get-Sha256 $zip } 'Tính mã SHA-256'
 [IO.File]::WriteAllText((Join-Path $OutDir 'SHA256SUMS'), "$hash  $name.zip`n", [Text.UTF8Encoding]::new($false))
 # Mã kiểm tra đi kèm gói (chép cùng zip lên VPS – deploy.ps1 kiểm khi có: phát hiện file chép thiếu / hỏng)
 [IO.File]::WriteAllText("$zip.sha256", "$hash  $name.zip`n", [Text.UTF8Encoding]::new($false))
